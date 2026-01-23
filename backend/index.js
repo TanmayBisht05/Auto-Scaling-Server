@@ -10,19 +10,24 @@ function sleep(ms){
 }
 
 
-app.get("/home",async(req,res)=>{
-
+app.get("/api",async(req,res)=>{
+    
     const start = Date.now();
+
+    let sum = 0;
+    for ( let i = 0 ; i < 1e9; i ++) sum += 1;
+
     await sleep(50 + Math.random() * 150);
 
-    const responseTime = Date.now() - start;
-
+    
     console.log(`[${new Date().toISOString()}] ${os.hostname()} handled request`);
-
-
+    
+    
+    const responseTime = Date.now() - start;
     res.json({
         message: "request received",
         hostname: os.hostname(),
+        sum: sum,
         pid: process.pid,
         responseTime: responseTime,
         timeStamp: new Date().toISOString()
