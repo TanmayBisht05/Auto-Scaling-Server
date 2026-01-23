@@ -1,4 +1,3 @@
-const { timeStamp } = require("console");
 const express = require("express");
 const os = require("os");
 
