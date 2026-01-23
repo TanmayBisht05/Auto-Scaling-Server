@@ -9,3 +9,16 @@ npm-debug.log*
 .DS_Store
 Thumbs.db
 
+venv/
+
+__pycache__/
+*.pyc
+*.pyo
+
+*.csv
+
+locust_stats/
+*.html
+
+.vscode/
+.idea/
