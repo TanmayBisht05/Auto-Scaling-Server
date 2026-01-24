@@ -15,7 +15,7 @@ app.get("/api",async(req,res)=>{
     const start = Date.now();
 
     let sum = 0;
-    for ( let i = 0 ; i < 1e9; i ++) sum += 1;
+    for ( let i = 0 ; i < 3e9; i ++) sum += 1;
 
     await sleep(50 + Math.random() * 150);
 

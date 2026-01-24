@@ -21,8 +21,6 @@ def get_locust_stats():
 
 
 
-
-
 def get_cpu_usage():
     cmd = [
         "docker", "stats",
@@ -70,7 +68,7 @@ if __name__ == "__main__":
         row = f"{t},{locust['rps']},{cpu},{replicas},{locust['latency']}"
         print(row)
 
-        with open("metrics.csv", "a") as f:
+        with open("../ai-controller/data/traffic_data.csv", "a") as f:
             f.write(row + "\n")
 
         time.sleep(1)
