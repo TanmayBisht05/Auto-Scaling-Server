@@ -1,12 +1,6 @@
 """
-modules/fuzzy_logic.py  —  Refactored FuzzyBrain
-Key changes vs original:
-  • load_ratio['low'] now uses trapmf so it has nonzero membership for any
-    RPS below ~60 % of capacity, not just exactly 0.
-  • Separate, weaker scale-down rule fires on low load alone (CPU can be
-    anything reasonable) — removes the AND deadlock.
-  • Accepts 6 GA parameters (adds thresh_up / thresh_down), returns them
-    from a property so brain_server can read them without a separate file read.
+Purpose: Fuzzy Inference System logic. Defines antecedents (load ratio, CPU), consequents (scaling action), and membership functions. Encapsulates the rule base for scale-up, scale-down, and hold decisions.
+Usage: Imported by optimizer.py and brain_server.py. Do not execute directly.
 """
 
 import numpy as np

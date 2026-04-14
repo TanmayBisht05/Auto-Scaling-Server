@@ -1,11 +1,6 @@
 """
-brain_server.py  —  Fixed version
-Bugs addressed:
-  1. Capacity Recovery: ESTIMATED_CAPACITY_PER_SERVER now has a symmetric
-     recovery path that actively climbs back toward observed headroom when
-     traffic is healthy, using a separate (faster) recovery alpha.
-  2. THRESH_UP / THRESH_DOWN are now read from FuzzyBrain directly, so they
-     always reflect whatever 6-param package the GA wrote to fuzzy_params.json.
+Purpose: REST API inference engine. Loads the trained PyTorch predictor and optimized Fuzzy Logic parameters. Receives current system metrics, predicts future RPS, evaluates conditions through the fuzzy system, and returns a scaling action alongside panic overrides.
+Usage: Run continuously to serve scaling decisions to the autoscaler agent.
 """
 
 from modules.fuzzy_logic import FuzzyBrain

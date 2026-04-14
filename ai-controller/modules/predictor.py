@@ -1,3 +1,8 @@
+"""
+Purpose: PyTorch model definition. Implements a 3-layer feedforward neural network mapping a sliding window of historical traffic to a single future data point. Designed for rapid sequence prediction.
+Usage: Imported by train_brain.py and brain_server.py. Do not execute directly.
+"""
+
 import torch
 import torch.nn as nn
 

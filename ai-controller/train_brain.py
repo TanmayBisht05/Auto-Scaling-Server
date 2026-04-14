@@ -1,15 +1,6 @@
 """
-train_brain.py  —  Updated
-Changes from original:
-  • Accepts an optional --profile argument pointing to a NASA-derived
-    nasa_profile_jul.csv (columns: second_offset, rps).
-    When provided, that file is used as the RPS time series directly.
-  • When --profile is NOT provided, falls back to traffic_data.csv
-    (original behaviour, used for online retraining via /retrain endpoint).
-  • The resampling step is skipped for NASA profiles because they are
-    already bucketed at a fixed interval by nasa_traffic_profile.py.
-  • train() accepts an optional profile_path kwarg so brain_server.py
-    can call it programmatically without touching sys.argv.
+Purpose: Neural Network training script. Ingests raw RPS time series data, resamples to 5-second windows, normalizes the data, and trains the PyTorch feedforward model to predict future load. Saves model state to disk.
+Usage: Execute offline to generate the initial load_predictor.pth model, or trigger via the /retrain endpoint for online learning.
 """
 
 import argparse

@@ -1,5 +1,5 @@
 """
-locust/traffic_profile.py  —  Replaces nasa_traffic_profile.py
+locust/traffic_profile.py
 ───────────────────────────────────────────────────────────────
 Converts the pre-processed WorldCup98 invocation_count.csv into the
 (second_offset, rps) profile that Locust and train_brain.py consume.

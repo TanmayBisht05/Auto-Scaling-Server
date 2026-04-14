@@ -1,4 +1,5 @@
-
+# Purpose: Docker orchestration configuration. Defines the scalable backend service and the static Nginx load balancer to distribute traffic.
+# Usage: Execute to build and start the infrastructure.
 services:
     server:
         build: .

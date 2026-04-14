@@ -1,26 +1,7 @@
 """
-optimizer.py  —  Updated (keeps pygad, extends to 6 genes)
-
-Changes from original:
-  • 6 genes instead of 4:
-      [load_low, load_high, cpu_safe, cpu_danger, thresh_up, thresh_down]
-    Fixes Bug 2 — thresh_up / thresh_down are now evolved and persisted.
-
-  • fitness_func passes all 6 genes to FuzzyBrain and uses genes[4]/[5] as
-    the decision thresholds inside the simulation instead of the hardcoded
-    0.6 / -0.6 values that were bypassing the GA entirely.
-
-  • CSV loading updated:
-      - Supports both headered and header-less traffic_data.csv
-      - Handles the new fail_ratio column (6th column)
-      - Resampling moved into a helper so the online loop can reuse it
-
-  • save_params() writes all 6 keys — brain_server reads them correctly.
-
-  • run_online_ga() starts a daemon thread that re-runs pygad every
-    `interval` seconds on the latest `window` rows and hot-reloads the brain.
-
-  • Offline one-shot mode unchanged: python optimizer.py
+Purpose: Genetic Algorithm optimization routine. Evolves a 6-parameter vector for the Fuzzy Inference System to minimize a cost function incorporating latency penalties and resource waste.
+         Supports offline execution and an online daemon thread for continuous adaptation.
+Usage: Run standalone to generate initial fuzzy_params.json, or let it run via the daemon initiated by the brain server.
 """
 
 import json

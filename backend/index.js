@@ -1,11 +1,11 @@
+/**
+ * Purpose: Node.js target application. Simulates a standard microservice workload by combining asynchronous I/O wait times with synchronous CPU-bound calculations to evaluate autoscaler responsiveness.
+ * Usage: Executed automatically by Docker Compose inside the backend containers.
+ */
+
 const express = require('express');
 const app = express();
 const PORT = 5000;
-
-// Simulates a real microservice doing:
-// - some async I/O wait (database/cache lookup)
-// - some lightweight CPU work (request parsing, business logic)
-// This makes Node.js behave like a real concurrent web server.
 
 const BASE_PROCESSING_MS = 30;   // base async wait (simulates I/O)
 const CPU_WORK_ITERATIONS = 50_000;  // lightweight CPU work per request

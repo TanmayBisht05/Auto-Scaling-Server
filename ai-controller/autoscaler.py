@@ -1,3 +1,8 @@
+"""
+Purpose: Scaling actuator. Polls current system metrics from Docker and Locust, requests a scaling decision from the brain server API, and executes Docker Compose commands to adjust the active replica count.
+Usage: Run continuously to close the control loop between telemetry, inference, and infrastructure scaling.
+"""
+
 import csv
 import time
 import requests

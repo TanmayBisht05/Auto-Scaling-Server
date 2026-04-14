@@ -1,3 +1,8 @@
+"""
+Purpose: Telemetry agent. Parses Nginx access logs to calculate RPS and failure ratios. Polls the Docker daemon for CPU utilization across active backend replicas. Measures active application latency and writes aggregated state to a CSV file.
+Usage: Run continuously alongside the load generator to supply real-time state to the AI controller and record historical data.
+"""
+
 import collections
 import requests
 import subprocess
