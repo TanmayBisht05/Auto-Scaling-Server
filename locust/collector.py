@@ -1,3 +1,4 @@
+import collections
 import requests
 import subprocess
 import time
@@ -8,6 +9,9 @@ import sys
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_FILE = os.path.join(SCRIPT_DIR, "../ai-controller/data/traffic_data.csv")
 DATA_FILE = os.path.abspath(DATA_FILE)
+# Add this at the top with other constants
+NGINX_CONTAINER = "auto-scaling-server-nginx-1"
+RPS_WINDOW_SECONDS = 5   # count requests in the last 5 seconds
 
 LOCUST_URL = "http://localhost:8089/stats/requests"
 
@@ -32,30 +36,62 @@ def get_server_container_ids():
         return []
 
 
-def get_locust_stats():
+def get_nginx_logs(since_seconds: int = RPS_WINDOW_SECONDS) -> list[str]:
+    """Fetch recent Nginx access log lines via docker logs --since."""
     try:
-        r = requests.get(LOCUST_URL).json()
-        current_rps = r.get("total_rps", 0)
-        fail_ratio = r.get("fail_ratio", 0)
-
-        stats = r.get("stats", [])
-        if stats:
-            total_reqs = sum(s["num_requests"] for s in stats)
-            if total_reqs > 0:
-                avg_latency = sum(s["avg_response_time"] * s["num_requests"]
-                                  for s in stats) / total_reqs
-            else:
-                avg_latency = 0.0
-        else:
-            avg_latency = 0.0
-
-        return {
-            "rps": current_rps,
-            "latency": avg_latency,
-            "fail_ratio": fail_ratio
-        }
+        cmd = [
+            "docker", "logs",
+            "--since", f"{since_seconds}s",
+            NGINX_CONTAINER
+        ]
+        output = subprocess.check_output(
+            cmd, stderr=subprocess.STDOUT
+        ).decode(errors="replace")
+        return [l for l in output.strip().split("\n") if l.strip()]
     except Exception:
-        return {"rps": 0, "latency": 0, "fail_ratio": 0}
+        return []
+
+
+def get_locust_stats() -> dict:
+    """
+    Measure RPS and latency directly from Nginx access logs.
+    No dependency on Locust's web API.
+    """
+    lines = get_nginx_logs(since_seconds=RPS_WINDOW_SECONDS)
+
+    # Each line looks like:
+    # 172.19.0.1 - - [11/Apr/2026:21:42:25 +0000] "GET /api HTTP/1.1" 200 137 ...
+    rps         = len(lines) / RPS_WINDOW_SECONDS
+    fail_count  = 0
+    total_count = len(lines)
+
+    for line in lines:
+        try:
+            # Status code is the 7th space-separated token
+            parts = line.split()
+            status = int(parts[8])
+            if status >= 500:
+                fail_count += 1
+        except (IndexError, ValueError):
+            continue
+
+    fail_ratio = fail_count / total_count if total_count > 0 else 0.0
+
+    # Latency: Nginx doesn't log it by default, so we measure it with
+    # a direct probe request to the backend
+    latency = 0.0
+    try:
+        t0 = time.time()
+        requests.get("http://localhost:8080/api", timeout=2)
+        latency = (time.time() - t0) * 1000   # convert to ms
+    except Exception:
+        latency = 0.0
+
+    return {
+        "rps":        round(rps, 2),
+        "latency":    round(latency, 2),
+        "fail_ratio": round(fail_ratio, 4),
+    }
 
 
 def get_cpu_usage():

@@ -1,49 +1,43 @@
-const express = require("express");
-const os = require("os");
-
+const express = require('express');
 const app = express();
 const PORT = 5000;
 
+// Simulates a real microservice doing:
+// - some async I/O wait (database/cache lookup)
+// - some lightweight CPU work (request parsing, business logic)
+// This makes Node.js behave like a real concurrent web server.
 
-function sleep(ms){
-    return new Promise (resolve => setTimeout(resolve,ms));
+const BASE_PROCESSING_MS = 30;   // base async wait (simulates I/O)
+const CPU_WORK_ITERATIONS = 50_000;  // lightweight CPU work per request
+
+function doCpuWork() {
+    // Lightweight synchronous work — fast enough not to block the event loop
+    // but heavy enough to show meaningful CPU usage under load
+    let result = 0;
+    for (let i = 0; i < CPU_WORK_ITERATIONS; i++) {
+        result += Math.sqrt(i);
+    }
+    return result;
 }
 
+app.get('/api', async (req, res) => {
+    // 1. Simulate async I/O (non-blocking — other requests proceed during this)
+    await new Promise(resolve =>
+        setTimeout(resolve, BASE_PROCESSING_MS + Math.random() * 20)
+    );
 
-app.get("/api",async(req,res)=>{
-    
-    const start = Date.now();
+    // 2. Do lightweight CPU work
+    const result = doCpuWork();
 
-    let sum = 0;
-    for ( let i = 0 ; i < 5e6; i ++) sum += 1;
-
-    await sleep(50 + Math.random() * 150);
-
-    
-    console.log(`[${new Date().toISOString()}] ${os.hostname()} handled request`);
-    
-    
-    const responseTime = Date.now() - start;
     res.json({
-        message: "request received",
-        hostname: os.hostname(),
-        sum: sum,
-        pid: process.pid,
-        responseTime: responseTime,
-        timeStamp: new Date().toISOString()
-
+        status: 'ok',
+        result: result,
+        timestamp: Date.now()
     });
-
 });
 
+app.get('/health', (req, res) => res.json({ status: 'healthy' }));
 
-
-app.get("/health", (req,res)=>{
-    res.send("OK");
-})
-
-
-
-app.listen(PORT, ()=>{
-    console.log("Server is listening at PORT", PORT);
+app.listen(PORT, () => {
+    console.log(`Server running on port ${PORT}`);
 });

@@ -1,3 +1,4 @@
+import csv
 import time
 import requests
 import subprocess
@@ -10,6 +11,34 @@ LOCUST_URL = "http://localhost:8089/stats/requests"
 MIN_SERVERS = 1
 MAX_SERVERS = 10
 INTERVAL = 5  # Seconds between decisions
+DATA_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                         "data/traffic_data.csv")
+
+def get_metrics_from_csv() -> dict | None:
+    """Read the most recent row from traffic_data.csv as fallback."""
+    try:
+        if not os.path.exists(DATA_FILE):
+            return None
+        with open(DATA_FILE, 'r') as f:
+            rows = f.readlines()
+        if not rows:
+            return None
+        # Get last non-empty line
+        last = next((r.strip() for r in reversed(rows) if r.strip()), None)
+        if not last:
+            return None
+        parts = last.split(',')
+        if len(parts) < 6:
+            return None
+        return {
+            'rps':        float(parts[1]),
+            'cpu':        float(parts[2]),
+            'replicas':   float(parts[3]),
+            'latency':    float(parts[4]),
+            'fail_ratio': float(parts[5]),
+        }
+    except Exception:
+        return None
 
 
 def get_server_container_ids():
@@ -55,24 +84,28 @@ def get_metrics():
                 pass
         avg_cpu = sum(cpus) / len(cpus) if cpus else 0.0
 
-        # 3. Get Locust Stats (RPS, Latency, Failures)
-        try:
-            r = requests.get(LOCUST_URL, timeout=1).json()
-            current_rps = r.get("total_rps", 0)
-            fail_ratio = r.get("fail_ratio", 0)
-
-            stats = r.get("stats", [])
-            avg_latency = 0.0
-            if stats:
-                total = sum(s["num_requests"] for s in stats)
-                if total > 0:
-                    avg_latency = sum(
-                        s["avg_response_time"] * s["num_requests"] for s in stats) / total
-        except requests.exceptions.RequestException:
-            # Locust might not be running yet, which is fine
-            current_rps = 0
-            fail_ratio = 0
-            avg_latency = 0
+        csv_metrics = get_metrics_from_csv()
+        if csv_metrics:
+            current_rps = csv_metrics['rps']
+            fail_ratio  = csv_metrics['fail_ratio']
+            avg_latency = csv_metrics['latency']
+        else:
+            try:
+                r = requests.get(LOCUST_URL, timeout=1).json()
+                current_rps = r.get("total_rps", None) or r.get("current_rps", 0)
+                fail_ratio  = r.get("fail_ratio", 0)
+                stats = r.get("stats", [])
+                avg_latency = 0.0
+                if stats:
+                    total = sum(s["num_requests"] for s in stats)
+                    if total > 0:
+                        avg_latency = sum(
+                            s["avg_response_time"] * s["num_requests"]
+                            for s in stats) / total
+            except requests.exceptions.RequestException:
+                current_rps = 0
+                fail_ratio  = 0
+                avg_latency = 0
 
         return {
             "replicas": replicas,
@@ -88,20 +121,15 @@ def get_metrics():
 
 def scale_docker(current_replicas, action):
     target = current_replicas
-
     if action == "SCALE_UP":
         target += 1
     elif action == "SCALE_DOWN":
         target -= 1
 
-    # Enforce Hard Limits
     target = max(MIN_SERVERS, min(target, MAX_SERVERS))
 
     if target != current_replicas:
-        print(
-            f"Executing: Scaling from {current_replicas} to {target} servers...")
-        # We use 'docker compose' (v2) or 'docker-compose' (v1) depending on system
-        # Trying generic command line method:
+        print(f"Executing: Scaling from {current_replicas} to {target} servers...")
         os.system(f"docker compose up -d --scale server={target}")
     else:
         print("Scaling limit reached (Min/Max).")
