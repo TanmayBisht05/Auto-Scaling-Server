@@ -5,11 +5,11 @@ Replays WorldCup98 request-rate profile as realistic Locust traffic.
 import csv
 import os
 import time
+import random
 from locust import HttpUser, task
 
-
-_PROFILE_PATH = os.path.join(os.path.dirname(__file__), "traffic_profile_test.csv")
-_profile: list[tuple[int, float]] = []
+_PROFILE_PATH = os.path.join(os.path.dirname(__file__), "traffic_profile_train.csv")
+_profile = []
 
 with open(_PROFILE_PATH, newline="") as f:
     for row in csv.DictReader(f):
@@ -18,25 +18,56 @@ with open(_PROFILE_PATH, newline="") as f:
 _TOTAL_SEC = _profile[-1][0] if _profile else 3600
 _T0        = time.time()
 
+TARGET_TEST_DURATION_SEC = int(os.environ.get("TEST_DURATION_SEC", 3600))
+TIME_COMPRESSION_FACTOR = _TOTAL_SEC / max(TARGET_TEST_DURATION_SEC, 1)
+
+print("[DEBUG INITIALIZATION]")
+print(f"Total Dataset Seconds: {_TOTAL_SEC}")
+print(f"Target Test Duration: {TARGET_TEST_DURATION_SEC}s")
+print(f"Time Compression Factor: {TIME_COMPRESSION_FACTOR}x")
+print(f"Profile length: {len(_profile)} buckets")
+
+_last_print_time = 0
 
 def _current_target_rps() -> float:
-    elapsed = (time.time() - _T0) % max(_TOTAL_SEC, 1)
-    # Binary search for the right bucket
+    global _last_print_time
+    now = time.time()
+    elapsed_real = now - _T0
+    elapsed_sim = (elapsed_real * TIME_COMPRESSION_FACTOR) % max(_TOTAL_SEC, 1)
+    
     lo, hi = 0, len(_profile) - 1
     while lo < hi:
         mid = (lo + hi + 1) // 2
-        if _profile[mid][0] <= elapsed:
+        if _profile[mid][0] <= elapsed_sim:
             lo = mid
         else:
             hi = mid - 1
-    return max(_profile[lo][1], 0.1)
+            
+    base_rps = max(_profile[lo][1], 0.1)
+    jitter = random.uniform(0.85, 1.15)
+    final_rps = base_rps * jitter
+    
+    if now - _last_print_time > 1.0:
+        print(f"[DEBUG] RealTime: {elapsed_real:.1f}s | SimTime: {elapsed_sim:.1f}s | BucketIdx: {lo} | BaseRPS: {base_rps:.1f} | FinalRPS: {final_rps:.1f}")
+        _last_print_time = now
+        
+    return final_rps
 
+# Define a high concurrency pool
+NUM_USERS = 100
 
 class WorldCupReplayUser(HttpUser):
-
     @task
     def hit_api(self):
         self.client.get("/api")
 
     def wait_time(self):
-        return 1.0 / _current_target_rps()
+        target = _current_target_rps()
+        
+        # Distribute the global RPS target across all active users
+        user_target = target / NUM_USERS
+        ideal_wait = 1.0 / max(user_target, 0.1)
+        
+        # Subtract the typical 50ms server latency to prevent cycle time bloat
+        adjusted_wait = ideal_wait - 0.05
+        return max(adjusted_wait, 0.0)

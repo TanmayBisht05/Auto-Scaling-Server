@@ -8,7 +8,7 @@ const app = express();
 const PORT = 5000;
 
 const BASE_PROCESSING_MS = 30;   // base async wait (simulates I/O)
-const CPU_WORK_ITERATIONS = 50_000;  // lightweight CPU work per request
+const CPU_WORK_ITERATIONS = 500_000;  // lightweight CPU work per request
 
 function doCpuWork() {
     // Lightweight synchronous work — fast enough not to block the event loop
