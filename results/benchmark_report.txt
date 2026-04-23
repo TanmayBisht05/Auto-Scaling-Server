@@ -1,0 +1,39 @@
+==================================================================
+  BENCHMARK: Hybrid AI  vs  Static Threshold Scaler
+  Metrics are from real recorded values — no simulation.
+==================================================================
+
+  SLA Violations (%)
+    Hybrid AI :     0.000  ░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░
+    Static    :     0.180  ██████████████████████████████
+    → Better: Hybrid AI
+
+  Mean Resource Waste
+    Hybrid AI :     0.002  █████████░░░░░░░░░░░░░░░░░░░░░
+    Static    :     0.007  ██████████████████████████████
+    → Better: Hybrid AI
+
+  Latency Mean (ms)
+    Hybrid AI :    46.300  █████████████████████████████░
+    Static    :    47.300  ██████████████████████████████
+    → Better: Hybrid AI
+
+  Latency Std-Dev (ms)
+    Hybrid AI :     5.800  ████████████████░░░░░░░░░░░░░░
+    Static    :    10.800  ██████████████████████████████
+    → Better: Hybrid AI
+
+  Mean Fail Ratio
+    Hybrid AI :     0.000  ░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░
+    Static    :     0.000  ░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░
+    → Better: Tie
+
+  Mean Replicas Used
+    Hybrid AI :     1.140  █████████████████████████████░
+    Static    :     1.180  ██████████████████████████████
+    → Better: Hybrid AI
+
+==================================================================
+  Ticks evaluated : AI=552  Static=552
+  Hybrid AI won   : 5/6 metrics
+==================================================================

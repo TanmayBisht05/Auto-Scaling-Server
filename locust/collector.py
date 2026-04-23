@@ -1,26 +1,25 @@
 """
-Purpose: Telemetry agent. Parses Nginx access logs to calculate RPS and failure ratios. Polls the Docker daemon for CPU utilization across active backend replicas. Measures active application latency and writes aggregated state to a CSV file.
-Usage: Run continuously alongside the load generator to supply real-time state to the AI controller and record historical data.
+Purpose: Telemetry agent. Parses Nginx access logs to calculate RPS and failure
+ratios. Polls the Docker daemon for CPU utilization across active backend
+replicas. Measures active application latency and writes aggregated state to a
+CSV file.
+Usage:
+    python collector.py                                    # writes ai_traffic_data.csv
+    python collector.py --output ../ai-controller/data/static_traffic_data.csv
 """
 
+import argparse
 import collections
 import requests
 import subprocess
 import time
 import os
-import sys
 
-# --- SMART PATH CONFIGURATION ---
-SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-DATA_FILE = os.path.join(SCRIPT_DIR, "../ai-controller/data/traffic_data.csv")
-DATA_FILE = os.path.abspath(DATA_FILE)
-# Add this at the top with other constants
+# --- CONFIGURATION ---
+SCRIPT_DIR      = os.path.dirname(os.path.abspath(__file__))
 NGINX_CONTAINER = "auto-scaling-server-nginx-1"
-RPS_WINDOW_SECONDS = 5   # count requests in the last 5 seconds
+RPS_WINDOW_SECONDS = 5
 
-LOCUST_URL = "http://localhost:8089/stats/requests"
-
-print(f"DEBUG: Saving data to: {DATA_FILE}")
 
 
 def get_server_container_ids():
@@ -129,35 +128,43 @@ def get_replica_count():
     return len(get_server_container_ids())
 
 
-if __name__ == "__main__":
-    os.makedirs(os.path.dirname(DATA_FILE), exist_ok=True)
-
-    print(f"Collector started. Writing to {DATA_FILE}")
-    print("Waiting for Locust...")
-
+def run(output_path: str):
+    os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
+    print(f"Collector started. Writing to {output_path}")
+ 
     start_time = time.time()
-
+ 
     while True:
         try:
-            stats = get_locust_stats()
-            cpu = get_cpu_usage()
+            stats    = get_locust_stats()
+            cpu      = get_cpu_usage()
             replicas = get_replica_count()
-
-            t = round(time.time() - start_time, 2)
-
+            t        = round(time.time() - start_time, 2)
+ 
             row = f"{t},{stats['rps']},{cpu},{replicas},{stats['latency']},{stats['fail_ratio']}"
-
             print(row)
-
-            with open(DATA_FILE, "a") as f:
+ 
+            with open(output_path, "a") as f:
                 f.write(row + "\n")
                 f.flush()
                 os.fsync(f.fileno())
-
+ 
             time.sleep(1)
+ 
         except KeyboardInterrupt:
-            print("\nStopping collector...")
+            print("\nStopping collector.")
             break
         except Exception as e:
             print(f"Error: {e}")
             time.sleep(1)
+ 
+ 
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Telemetry collector")
+    parser.add_argument(
+        "--output",
+        default=os.path.join(SCRIPT_DIR, "../ai-controller/data/ai_traffic_data.csv"),
+        help="Path to write CSV output (default: ai_traffic_data.csv)",
+    )
+    args = parser.parse_args()
+    run(output_path=os.path.abspath(args.output))
