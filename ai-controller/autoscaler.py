@@ -1,34 +1,65 @@
 """
-Purpose: Scaling actuator. Polls current system metrics from Docker and Locust, requests a scaling decision from the brain server API, and executes Docker Compose commands to adjust the active replica count.
-Usage: Run continuously to close the control loop between telemetry, inference, and infrastructure scaling.
+Purpose: Scaling actuator. Polls current system metrics, requests a scaling
+decision from the brain server (AI mode) or applies a static threshold policy
+(static mode), and executes Docker Compose commands to adjust replica count.
+ 
+Usage:
+    python autoscaler.py                                              # AI mode, ai_traffic_data.csv
+    python autoscaler.py --mode static --data data/static_traffic_data.csv
 """
-
-import csv
+import argparse
 import time
 import requests
 import subprocess
 import os
-import sys
 
 # --- CONFIGURATION ---
 BRAIN_URL = "http://localhost:6000/decide"
-LOCUST_URL = "http://localhost:8089/stats/requests"
 MIN_SERVERS = 1
 MAX_SERVERS = 10
 INTERVAL = 5  # Seconds between decisions
-DATA_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                         "data/traffic_data.csv")
 
-def get_metrics_from_csv() -> dict | None:
-    """Read the most recent row from traffic_data.csv as fallback."""
+# ─────────────────────────────────────────────────────────────────────────────
+#  STATIC THRESHOLD CONTROLLER
+# ─────────────────────────────────────────────────────────────────────────────
+ 
+class StaticController:
+    CPU_UP    = 70.0
+    CPU_DOWN  = 30.0
+    LAT_UP    = 1000.0
+    LAT_DOWN  = 300.0
+    COOLDOWN  = 3
+ 
+    def __init__(self):
+        self._cooldown = 0
+ 
+    def decide(self, metrics: dict) -> dict:
+        action = "HOLD"
+        if self._cooldown > 0:
+            self._cooldown -= 1
+        else:
+            cpu     = metrics['current_cpu']
+            latency = metrics['latency']
+            if cpu > self.CPU_UP or latency > self.LAT_UP:
+                action         = "SCALE_UP"
+                self._cooldown = self.COOLDOWN
+            elif cpu < self.CPU_DOWN and latency < self.LAT_DOWN:
+                action         = "SCALE_DOWN"
+                self._cooldown = self.COOLDOWN
+        return {"action": action, "fuzzy_score": 0.0,
+                "estimated_capacity": 0.0, "predicted_rps": int(metrics['current_rps'])}
+ 
+ 
+# ─────────────────────────────────────────────────────────────────────────────
+#  SHARED HELPERS
+# ─────────────────────────────────────────────────────────────────────────────
+
+def get_metrics_from_csv(data_file: str) -> dict | None:
     try:
-        if not os.path.exists(DATA_FILE):
+        if not os.path.exists(data_file):
             return None
-        with open(DATA_FILE, 'r') as f:
+        with open(data_file, 'r') as f:
             rows = f.readlines()
-        if not rows:
-            return None
-        # Get last non-empty line
         last = next((r.strip() for r in reversed(rows) if r.strip()), None)
         if not last:
             return None
@@ -64,60 +95,39 @@ def get_server_container_ids():
         return []
 
 
-def get_metrics():
-    """Gather all metrics needed by the brain"""
+def get_metrics(data_file: str):
     try:
-        # 1. Get Replica Count & Container IDs
         container_ids = get_server_container_ids()
-        replicas = len(container_ids)
+        replicas      = len(container_ids)
         if replicas == 0:
-            return None  # System is down or starting up
-
-        # 2. Get CPU Usage (Avg of all replicas)
-        # We pass the list of IDs directly to docker stats to be precise
-        cmd_cpu = ["docker", "stats", "--no-stream",
-                   "--format", "{{.CPUPerc}}"] + container_ids
-        output_cpu = subprocess.check_output(
-            cmd_cpu).decode().strip().split("\n")
-
+            return None
+ 
+        cmd_cpu    = ["docker", "stats", "--no-stream",
+                      "--format", "{{.CPUPerc}}"] + container_ids
+        output_cpu = subprocess.check_output(cmd_cpu).decode().strip().split("\n")
+ 
         cpus = []
         for line in output_cpu:
             try:
-                val = float(line.replace("%", "").strip())
-                cpus.append(val)
+                cpus.append(float(line.replace("%", "").strip()))
             except ValueError:
                 pass
         avg_cpu = sum(cpus) / len(cpus) if cpus else 0.0
-
-        csv_metrics = get_metrics_from_csv()
-        if csv_metrics:
-            current_rps = csv_metrics['rps']
-            fail_ratio  = csv_metrics['fail_ratio']
-            avg_latency = csv_metrics['latency']
+ 
+        csv_m = get_metrics_from_csv(data_file)
+        if csv_m:
+            current_rps = csv_m['rps']
+            fail_ratio  = csv_m['fail_ratio']
+            avg_latency = csv_m['latency']
         else:
-            try:
-                r = requests.get(LOCUST_URL, timeout=1).json()
-                current_rps = r.get("total_rps", None) or r.get("current_rps", 0)
-                fail_ratio  = r.get("fail_ratio", 0)
-                stats = r.get("stats", [])
-                avg_latency = 0.0
-                if stats:
-                    total = sum(s["num_requests"] for s in stats)
-                    if total > 0:
-                        avg_latency = sum(
-                            s["avg_response_time"] * s["num_requests"]
-                            for s in stats) / total
-            except requests.exceptions.RequestException:
-                current_rps = 0
-                fail_ratio  = 0
-                avg_latency = 0
-
+            current_rps = avg_latency = fail_ratio = 0
+ 
         return {
-            "replicas": replicas,
+            "replicas":    replicas,
             "current_cpu": avg_cpu,
             "current_rps": current_rps,
-            "latency": avg_latency,
-            "fail_ratio": fail_ratio
+            "latency":     avg_latency,
+            "fail_ratio":  fail_ratio,
         }
     except Exception as e:
         print(f"Error fetching metrics: {e}")
@@ -136,52 +146,87 @@ def scale_docker(current_replicas, action):
     if target != current_replicas:
         print(f"Executing: Scaling from {current_replicas} to {target} servers...")
         os.system(f"docker compose up -d --scale server={target}")
+        
+        # Force Nginx to re-resolve the backend IPs
+        print("Reloading Nginx configuration...")
+        os.system("docker compose exec -T nginx nginx -s reload")
     else:
-        print("Scaling limit reached (Min/Max).")
+        print("Scaling limit reached.")
 
 
-def run_controller():
-    print("Auto-Scaler Controller Started... Monitoring system.")
-    print(f"Connecting to Brain at: {BRAIN_URL}")
-
+# ─────────────────────────────────────────────────────────────────────────────
+#  MAIN LOOP
+# ─────────────────────────────────────────────────────────────────────────────
+ 
+def run_controller(mode: str, data_file: str):
+    static_ctrl = StaticController()
+ 
+    print(f"Auto-Scaler started — mode: {mode.upper()}")
+    print(f"Reading metrics from: {data_file}")
+    if mode == 'ai':
+        print(f"Connecting to Brain at: {BRAIN_URL}")
+ 
     while True:
         try:
-            metrics = get_metrics()
-
+            metrics = get_metrics(data_file)
+ 
             if metrics:
-                # Ask the Brain for a decision
-                try:
-                    resp = requests.post(BRAIN_URL, json=metrics)
-
-                    if resp.status_code == 200:
-                        decision = resp.json()
-                        action = decision.get("action", "HOLD")
-                        score = decision.get("fuzzy_score", 0)
-                        est_cap = decision.get("estimated_capacity", 0)
-                        pred_rps = decision.get("predicted_rps", 0)
-
-                        # Print Status Line
-                        print(f"Stats: RPS={int(metrics['current_rps'])} CPU={int(metrics['current_cpu'])}% Latency={int(metrics['latency'])}ms | "
-                              f"Brain: {action} (Score: {score}) | Est.Cap: {est_cap}")
-
-                        if action != "HOLD":
-                            scale_docker(metrics['replicas'], action)
-                    else:
-                        print(f"Brain Error {resp.status_code}: {resp.text}")
-                except requests.exceptions.ConnectionError:
+                if mode == 'static':
+                    decision = static_ctrl.decide(metrics)
+                    action   = decision["action"]
                     print(
-                        "Could not connect to Brain Server. Is it running on port 6000?")
+                        f"RPS={int(metrics['current_rps'])} "
+                        f"CPU={int(metrics['current_cpu'])}% "
+                        f"Latency={int(metrics['latency'])}ms | "
+                        f"Static: {action}"
+                    )
+                    if action != "HOLD":
+                        scale_docker(metrics['replicas'], action)
+ 
+                else:
+                    try:
+                        resp = requests.post(BRAIN_URL, json=metrics)
+                        if resp.status_code == 200:
+                            decision = resp.json()
+                            action   = decision.get("action", "HOLD")
+                            print(
+                                f"RPS={int(metrics['current_rps'])} "
+                                f"CPU={int(metrics['current_cpu'])}% "
+                                f"Latency={int(metrics['latency'])}ms | "
+                                f"Brain: {action} "
+                                f"(Score:{decision.get('fuzzy_score',0)}) "
+                                f"Est.Cap:{decision.get('estimated_capacity',0)}"
+                            )
+                            if action != "HOLD":
+                                scale_docker(metrics['replicas'], action)
+                        else:
+                            print(f"Brain error {resp.status_code}: {resp.text}")
+                    except requests.exceptions.ConnectionError:
+                        print("Cannot reach Brain Server on port 6000.")
             else:
-                print("Waiting for Docker/Locust metrics...")
-
+                print("Waiting for metrics...")
+ 
         except KeyboardInterrupt:
             print("\nStopping Auto-Scaler.")
             break
         except Exception as e:
-            print(f"Unexpected Controller Error: {e}")
-
+            print(f"Controller error: {e}")
+ 
         time.sleep(INTERVAL)
-
-
+ 
+ 
 if __name__ == "__main__":
-    run_controller()
+    SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+ 
+    parser = argparse.ArgumentParser(description="Auto-Scaler actuator")
+    parser.add_argument(
+        '--mode', choices=['ai', 'static'], default='ai',
+        help='ai = Brain Server (default);  static = threshold policy'
+    )
+    parser.add_argument(
+        '--data',
+        default=os.path.join(SCRIPT_DIR, "data/ai_traffic_data.csv"),
+        help='CSV file written by collector.py (default: ai_traffic_data.csv)'
+    )
+    args = parser.parse_args()
+    run_controller(mode=args.mode, data_file=os.path.abspath(args.data))

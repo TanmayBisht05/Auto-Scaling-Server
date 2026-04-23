@@ -1,71 +1,31 @@
 """
-benchmark.py  —  Objective C: Comparative Analysis
-────────────────────────────────────────────────────
-Replays traffic_data.csv through two controllers:
-  A) Hybrid AI   — the real brain_server decisions recorded in the CSV
-  B) Static      — a simple threshold scaler (CPU > 70 % → scale up, < 30 % → down)
-
-Computes and prints:
-  • SLA violation rate   (% of ticks with latency > 2000 ms)
-  • Resource waste score (mean excess replicas above minimum needed)
-  • Latency stability    (std-dev of response time in ms)
-  • Fail ratio           (mean across all ticks)
-
-Run:
-    python benchmark.py [--data ai-controller/data/traffic_data.csv]
-                        [--out  results/benchmark_report.txt]
+benchmark.py  —  Comparative Analysis
+──────────────────────────────────────
+Compares two real traffic CSV files produced by running the system under
+identical load — once with the AI controller, once with the static controller.
+ 
+Latency, fail_ratio, and replica counts are taken directly from the recorded
+CSV values. This is correct because each CSV reflects what actually happened
+during that run — the AI's lower latency is real evidence of proactive scaling,
+not an artefact to be normalised away.
+ 
+Capacity per server is estimated empirically from the AI run's healthy periods
+and is used only for the resource-waste calculation.
+ 
+Usage:
+    python benchmark.py \
+        --ai-data     data/ai_traffic_data.csv \
+        --static-data data/static_traffic_data.csv \
+        --out         ../results/benchmark_report.txt
 """
 
 import argparse
 import csv
-import json
 import math
 import os
 import statistics
-from copy import deepcopy
 
-
-# ─────────────────────────────────────────────────────────────────────────────
-#  STATIC REACTIVE THRESHOLD SCALER
-# ─────────────────────────────────────────────────────────────────────────────
-
-class StaticScaler:
-    """
-    Dumb reactive policy:
-      scale-up   if CPU > CPU_UP   or  latency > LAT_UP
-      scale-down if CPU < CPU_DOWN and latency < LAT_DOWN
-      else hold
-    Cooldown prevents thrashing (no action within COOLDOWN ticks of last change).
-    """
-    CPU_UP    = 70.0
-    CPU_DOWN  = 30.0
-    LAT_UP    = 1000.0   # ms
-    LAT_DOWN  = 300.0    # ms
-    COOLDOWN  = 3        # ticks
-
-    def __init__(self):
-        self.replicas    = 1
-        self._cooldown_remaining = 0
-
-    def decide(self, cpu: float, latency: float) -> str:
-        if self._cooldown_remaining > 0:
-            self._cooldown_remaining -= 1
-            return "HOLD"
-
-        if cpu > self.CPU_UP or latency > self.LAT_UP:
-            self._cooldown_remaining = self.COOLDOWN
-            return "SCALE_UP"
-        elif cpu < self.CPU_DOWN and latency < self.LAT_DOWN:
-            self._cooldown_remaining = self.COOLDOWN
-            return "SCALE_DOWN"
-        return "HOLD"
-
-    def apply(self, action: str, min_r=1, max_r=10):
-        if action == "SCALE_UP"   and self.replicas < max_r:
-            self.replicas += 1
-        elif action == "SCALE_DOWN" and self.replicas > min_r:
-            self.replicas -= 1
-
+import numpy as np
 
 # ─────────────────────────────────────────────────────────────────────────────
 #  DATA LOADING
@@ -74,7 +34,6 @@ class StaticScaler:
 def load_csv(path: str) -> list[dict]:
     rows = []
     with open(path, newline='') as f:
-        # Detect whether file has a header row
         sample = f.read(256)
         f.seek(0)
         has_header = not sample.split('\n')[0].split(',')[0].replace('.','').isdigit()
@@ -89,7 +48,6 @@ def load_csv(path: str) -> list[dict]:
                         'replicas':   float(row.get('replicas', 1)),
                         'latency':    float(row.get('latency', 0)),
                         'fail_ratio': float(row.get('fail_ratio', 0)),
-                        'ai_action':  row.get('action', 'HOLD'),
                     })
                 except (ValueError, KeyError):
                     continue
@@ -105,35 +63,54 @@ def load_csv(path: str) -> list[dict]:
                         'replicas':   float(row[3]),
                         'latency':    float(row[4]),
                         'fail_ratio': float(row[5]),
-                        'ai_action':  'HOLD',
                     })
                 except (ValueError, IndexError):
                     continue
     return rows
 
-
 # ─────────────────────────────────────────────────────────────────────────────
-#  METRICS
+#  CAPACITY ESTIMATION  (used only for resource-waste calculation)
+# ─────────────────────────────────────────────────────────────────────────────
+ 
+def estimate_capacity(rows: list[dict]) -> float:
+    """
+    Derive RPS-per-replica from healthy periods in the AI run.
+    Healthy = latency < 500 ms AND fail_ratio < 0.5 %.
+    Returns the p95 of load_per_replica during those periods.
+    Only used to judge how many replicas were "needed" per tick for
+    the resource-waste metric — not used for latency or SLA calculations.
+    """
+    healthy_loads = [
+        r['rps'] / max(r['replicas'], 1)
+        for r in rows
+        if r['latency'] < 500 and r['fail_ratio'] < 0.005 and r['replicas'] >= 1
+    ]
+    if len(healthy_loads) < 10:
+        print(f"[Benchmark] Warning: only {len(healthy_loads)} healthy rows "
+              f"for capacity estimate — using fallback of 50 rps/replica.")
+        return 50.0
+    cap = float(np.clip(np.percentile(healthy_loads, 95), 1.0, 10_000.0))
+    print(f"[Benchmark] Empirical capacity: {cap:.2f} rps/replica "
+          f"(p95 of {len(healthy_loads)} healthy rows)")
+    return cap
+ 
+ 
+# ─────────────────────────────────────────────────────────────────────────────
+#  METRICS  (all derived from real recorded values)
 # ─────────────────────────────────────────────────────────────────────────────
 
-def compute_metrics(rows: list[dict], replicas_series: list[int],
-                    estimated_cap: float = 10.0) -> dict:
-    """
-    Given the observed data rows and the replica counts our controller *would
-    have chosen*, compute benchmark metrics.
-    """
+def compute_metrics(rows: list[dict], estimated_cap: float) -> dict:
     latencies    = [r['latency']    for r in rows]
     fail_ratios  = [r['fail_ratio'] for r in rows]
+    replicas_series = [r['replicas'] for r in rows]
     n = len(rows)
 
-    # SLA violations: latency > 2000 ms
-    sla_violations = sum(1 for l in latencies if l > 2000)
+    sla_violations = sum(1 for l in latencies if l > 200)
 
-    # Resource waste: excess replicas above minimum needed per tick
     waste_per_tick = []
-    for i, row in enumerate(rows):
+    for row in rows:
         needed = max(1, math.ceil(row['rps'] / max(estimated_cap, 1)))
-        waste  = max(0, replicas_series[i] - needed - 1)  # 1 spare OK
+        waste  = max(0, row['replicas'] - needed - 1)
         waste_per_tick.append(waste)
 
     return {
@@ -143,121 +120,120 @@ def compute_metrics(rows: list[dict], replicas_series: list[int],
         'latency_mean_ms':   round(statistics.mean(latencies), 1),
         'latency_stddev_ms': round(statistics.pstdev(latencies), 1),
         'mean_fail_ratio':   round(statistics.mean(fail_ratios), 5),
-        'max_replicas':      max(replicas_series),
         'mean_replicas':     round(statistics.mean(replicas_series), 2),
     }
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-#  SIMULATE STATIC SCALER ON DATA
-# ─────────────────────────────────────────────────────────────────────────────
-
-def simulate_static(rows: list[dict]) -> list[int]:
-    scaler    = StaticScaler()
-    replicas  = []
-    for row in rows:
-        action = scaler.decide(row['cpu'], row['latency'])
-        scaler.apply(action)
-        replicas.append(scaler.replicas)
-    return replicas
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-#  EXTRACT AI REPLICA SERIES FROM CSV
-# ─────────────────────────────────────────────────────────────────────────────
-
-def extract_ai_replicas(rows: list[dict]) -> list[int]:
-    """
-    If the CSV has a 'replicas' column (what the AI system actually ran),
-    use it directly as the 'AI controller' replay.
-    """
-    return [int(r['replicas']) for r in rows]
-
-
 # ─────────────────────────────────────────────────────────────────────────────
 #  REPORT
 # ─────────────────────────────────────────────────────────────────────────────
-
+ 
 def _bar(value: float, max_val: float, width: int = 30) -> str:
     filled = int(round(value / max(max_val, 1e-9) * width))
     return '█' * filled + '░' * (width - filled)
-
-
+ 
+ 
 def print_report(ai: dict, static: dict, out_path: str | None = None):
-    lines = []
-    lines.append("=" * 62)
-    lines.append("  BENCHMARK: Hybrid AI  vs  Static Threshold Scaler")
-    lines.append("=" * 62)
-
-    metrics_to_show = [
-        ("SLA Violations (%)",     'sla_violation_pct', True),
-        ("Mean Resource Waste",    'mean_waste',        True),
-        ("Latency Mean (ms)",      'latency_mean_ms',   True),
-        ("Latency Std-Dev (ms)",   'latency_stddev_ms', True),
-        ("Mean Fail Ratio",        'mean_fail_ratio',   True),
-        ("Mean Replicas",          'mean_replicas',     True),
+    lines = [
+        "=" * 66,
+        "  BENCHMARK: Hybrid AI  vs  Static Threshold Scaler",
+        "  Metrics are from real recorded values — no simulation.",
+        "=" * 66,
     ]
-
+ 
+    metrics_to_show = [
+        ("SLA Violations (%)",   'sla_violation_pct', True),
+        ("Mean Resource Waste",  'mean_waste',        True),
+        ("Latency Mean (ms)",    'latency_mean_ms',   True),
+        ("Latency Std-Dev (ms)", 'latency_stddev_ms', True),
+        ("Mean Fail Ratio",      'mean_fail_ratio',   True),
+        ("Mean Replicas Used",   'mean_replicas',     True),
+    ]
+ 
+    ai_wins = 0
     for label, key, lower_better in metrics_to_show:
         ai_val     = ai[key]
         static_val = static[key]
         max_val    = max(ai_val, static_val, 1e-9)
-
+ 
         lines.append(f"\n  {label}")
         lines.append(f"    Hybrid AI : {ai_val:>9.3f}  {_bar(ai_val, max_val)}")
         lines.append(f"    Static    : {static_val:>9.3f}  {_bar(static_val, max_val)}")
-
+ 
         if lower_better:
-            winner = "Hybrid AI" if ai_val < static_val else \
-                     "Static"   if static_val < ai_val else "Tie"
+            winner = ("Hybrid AI" if ai_val < static_val else
+                      "Static"   if static_val < ai_val else "Tie")
         else:
-            winner = "Hybrid AI" if ai_val > static_val else \
-                     "Static"   if static_val > ai_val else "Tie"
+            winner = ("Hybrid AI" if ai_val > static_val else
+                      "Static"   if static_val > ai_val else "Tie")
+ 
+        if winner == "Hybrid AI":
+            ai_wins += 1
         lines.append(f"    → Better: {winner}")
-
-    lines.append("\n" + "=" * 62)
-    lines.append(f"  Total ticks evaluated: {ai['n_ticks']}")
-    lines.append("=" * 62)
-
+ 
+    lines += [
+        "\n" + "=" * 66,
+        f"  Ticks evaluated : AI={ai['n_ticks']}  Static={static['n_ticks']}",
+        f"  Hybrid AI won   : {ai_wins}/{len(metrics_to_show)} metrics",
+        "=" * 66,
+    ]
+ 
     report = "\n".join(lines)
     print(report)
-
+ 
     if out_path:
         os.makedirs(os.path.dirname(os.path.abspath(out_path)), exist_ok=True)
         with open(out_path, 'w') as f:
             f.write(report)
         print(f"\nReport saved → {out_path}")
-
-
+ 
+ 
 # ─────────────────────────────────────────────────────────────────────────────
 #  MAIN
 # ─────────────────────────────────────────────────────────────────────────────
 
 def main():
-    parser = argparse.ArgumentParser(description="Benchmark AI vs Static scaler")
-    parser.add_argument('--data', default='ai-controller/data/traffic_data.csv')
-    parser.add_argument('--out',  default=None,
-                        help='Optional path to write text report')
-    parser.add_argument('--cap',  type=float, default=10.0,
-                        help='Estimated capacity per server for waste calc')
+    parser = argparse.ArgumentParser(
+        description="Compare AI vs Static scaler from two real traffic CSV files")
+    parser.add_argument(
+        '--ai-data', required=True,
+        help='CSV from the AI controller run'
+    )
+    parser.add_argument(
+        '--static-data', required=True,
+        help='CSV from the static controller run'
+    )
+    parser.add_argument(
+        '--out', default=None,
+        help='Optional path to write the text report'
+    )
     args = parser.parse_args()
-
-    print(f"Loading data from {args.data} ...")
-    rows = load_csv(args.data)
-    if not rows:
-        print("ERROR: No data loaded — check --data path.")
+ 
+    print(f"Loading AI data     : {args.ai_data}")
+    ai_rows = load_csv(args.ai_data)
+    if not ai_rows:
+        print("ERROR: No AI data loaded — check path.")
         return
-    print(f"  {len(rows)} rows loaded.\n")
-
-    # AI controller: use the replica counts that were actually running
-    ai_replicas     = extract_ai_replicas(rows)
-    static_replicas = simulate_static(rows)
-
-    ai_metrics     = compute_metrics(rows, ai_replicas,     args.cap)
-    static_metrics = compute_metrics(rows, static_replicas, args.cap)
-
+ 
+    print(f"Loading Static data : {args.static_data}")
+    static_rows = load_csv(args.static_data)
+    if not static_rows:
+        print("ERROR: No static data loaded — check path.")
+        return
+ 
+    # Trim both to the same length for a fair tick-by-tick comparison
+    n = min(len(ai_rows), len(static_rows))
+    ai_rows     = ai_rows[:n]
+    static_rows = static_rows[:n]
+    print(f"\n{n} ticks used from each run.\n")
+ 
+    # Capacity estimated from AI run's healthy periods — used only for waste calc
+    cap = estimate_capacity(ai_rows)
+ 
+    ai_metrics     = compute_metrics(ai_rows,     cap)
+    static_metrics = compute_metrics(static_rows, cap)
+ 
     print_report(ai_metrics, static_metrics, out_path=args.out)
-
-
+ 
+ 
 if __name__ == '__main__':
     main()
+ 
