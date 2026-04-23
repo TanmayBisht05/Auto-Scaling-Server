@@ -1,8 +1,8 @@
 {
-  "load_low": 0.421,
-  "load_high": 0.6549,
-  "cpu_safe": 10.2946,
-  "cpu_danger": 58.5214,
-  "thresh_up": 0.5267,
-  "thresh_down": -0.2991
+  "load_low": 0.6069,
+  "load_high": 0.7901,
+  "cpu_safe": 26.2184,
+  "cpu_danger": 64.4612,
+  "thresh_up": 0.203,
+  "thresh_down": -0.5955
 }

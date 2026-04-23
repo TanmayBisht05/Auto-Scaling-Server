@@ -1,17 +1,26 @@
 """
-Purpose: REST API inference engine. Loads the trained PyTorch predictor and optimized Fuzzy Logic parameters. Receives current system metrics, predicts future RPS, evaluates conditions through the fuzzy system, and returns a scaling action alongside panic overrides.
-Usage: Run continuously to serve scaling decisions to the autoscaler agent.
+Purpose: REST API inference engine. Loads the trained PyTorch predictor and
+optimized Fuzzy Logic parameters. Receives current system metrics, predicts
+future RPS, evaluates conditions through the fuzzy system, and returns a
+scaling action alongside panic overrides.
+Usage:
+    python brain_server.py                                    # uses ai_traffic_data.csv
+    python brain_server.py --data data/ai_traffic_data.csv
 """
 
-from modules.fuzzy_logic import FuzzyBrain
-from modules.predictor import LoadPredictor
-import os
-import numpy as np
+import argparse
 import json
+import os
+import threading
+ 
+import numpy as np
 import torch
 from flask import Flask, request, jsonify
-import threading
+ 
+from modules.fuzzy_logic import FuzzyBrain
+from modules.predictor import LoadPredictor
 from train_brain import train
+from optimizer import run_online_ga
 
 app = Flask(__name__)
 
@@ -25,15 +34,14 @@ history_rps = []
 HISTORY_SIZE = 10
 
 # ── Capacity estimator ───────────────────────────────────────────────────────
-# Two separate alphas: shrink quickly under stress, recover more aggressively
-# once conditions are healthy (asymmetry was the original bug — recovery was
-# only allowed when load_per_server happened to *exceed* the current estimate,
-# which almost never happens at low traffic).
-ESTIMATED_CAPACITY_PER_SERVER = 10.0
+# Starts at 50 RPS/replica (reasonable for a Go server doing CPU work).
+# Updated via asymmetric EWMA: shrinks fast when overloaded, recovers steadily
+# when the system is healthy. This replaces the old hardcoded 70.0.
+ESTIMATED_CAPACITY_PER_SERVER = 600.0
 ALPHA_SHRINK   = 0.25   # Fast response to overload
 ALPHA_RECOVER  = 0.10   # Steady climb back to true capacity
 CAPACITY_FLOOR = 1.0
-CAPACITY_CEIL  = 200.0
+CAPACITY_CEIL  = 1000.0
 
 # ── Brain init ───────────────────────────────────────────────────────────────
 print("Loading Brain...")
@@ -67,7 +75,7 @@ def _load_fuzzy():
             bp.get('load_high',   0.80),
             bp.get('cpu_safe',   40.0),
             bp.get('cpu_danger', 80.0),
-            bp.get('thresh_up',   0.45),   # now persisted by GA
+            bp.get('thresh_up',   0.45),  
             bp.get('thresh_down', -0.35),
         ]
         brain = FuzzyBrain(p_list)
@@ -88,22 +96,43 @@ THRESH_UP, THRESH_DOWN = fuzzy.get_thresholds()
 
 @app.route('/decide', methods=['POST'])
 def decide():
-    global history_rps, fuzzy, THRESH_UP, THRESH_DOWN
-
+    global history_rps, fuzzy, THRESH_UP, THRESH_DOWN, ESTIMATED_CAPACITY_PER_SERVER
     data           = request.json
     curr_rps       = data.get('current_rps',  0)
     curr_cpu       = data.get('current_cpu',  0)
     replicas       = data.get('replicas',      1)
     curr_latency   = data.get('latency',       0)
     curr_fail_ratio = data.get('fail_ratio',   0)
+    
+    LATENCY_PANIC = 2000
 
-    # ── 1. DYNAMIC CAPACITY LEARNING (symmetric) ─────────────────────────────
-    success_ratio  = max(1.0 - curr_fail_ratio, 0.001)
-    true_rps       = curr_rps / success_ratio
+    # ── 1. DYNAMIC CAPACITY LEARNING ─────────────────────────────────────────
+    # Corrected true demand accounting for failed requests
+    success_ratio   = max(1.0 - curr_fail_ratio, 0.001)
+    true_rps        = curr_rps / success_ratio
+    load_per_server = true_rps / max(replicas, 1)
 
-    LATENCY_PANIC    = 2000
+    # Only update when we have enough traffic to learn from
+    if load_per_server > 1.0:
+        is_healthy    = curr_latency < 500 and curr_fail_ratio < 0.01
+        is_overloaded = curr_latency > 1000 or curr_fail_ratio > 0.05
 
-    ESTIMATED_CAPACITY_PER_SERVER = 70.0
+        if is_healthy and load_per_server > ESTIMATED_CAPACITY_PER_SERVER:
+            # Servers are comfortable AND handling more than we thought — raise estimate
+            ESTIMATED_CAPACITY_PER_SERVER = (
+                (1 - ALPHA_RECOVER) * ESTIMATED_CAPACITY_PER_SERVER
+                + ALPHA_RECOVER * load_per_server
+            )
+        elif is_overloaded and load_per_server < ESTIMATED_CAPACITY_PER_SERVER:
+            # Servers are struggling at a load below our estimate — lower it
+            ESTIMATED_CAPACITY_PER_SERVER = (
+                (1 - ALPHA_SHRINK) * ESTIMATED_CAPACITY_PER_SERVER
+                + ALPHA_SHRINK * load_per_server * 0.8
+            )
+
+        ESTIMATED_CAPACITY_PER_SERVER = float(
+            np.clip(ESTIMATED_CAPACITY_PER_SERVER, CAPACITY_FLOOR, CAPACITY_CEIL)
+        )
 
     # ── 2. PREDICTION ─────────────────────────────────────────────────────────
     history_rps.append(true_rps)
@@ -134,7 +163,7 @@ def decide():
 
     # ── 4. PANIC OVERRIDE ────────────────────────────────────────────────────
     is_dying = False
-
+    
     if curr_latency > LATENCY_PANIC:
         action   = "SCALE_UP"
         score    = 2.0
@@ -180,9 +209,22 @@ def trigger_retrain():
     return jsonify({"status": "training_started"})
 
 
-from optimizer import run_online_ga
-run_online_ga(interval=120, window=200)
-
-
+# ─────────────────────────────────────────────────────────────────────────────
+#  ENTRY POINT
+# ─────────────────────────────────────────────────────────────────────────────
+ 
 if __name__ == '__main__':
+    parser = argparse.ArgumentParser(description="Brain inference server")
+    parser.add_argument(
+        '--data',
+        default=os.path.join(SCRIPT_DIR, "data/ai_traffic_data.csv"),
+        help='CSV file written by collector.py for online GA (default: ai_traffic_data.csv)'
+    )
+    args = parser.parse_args()
+ 
+    data_path = os.path.abspath(args.data)
+    print(f"Brain using data file: {data_path}")
+
+    run_online_ga(interval=120, window=200, data_path=data_path)
+ 
     app.run(host='0.0.0.0', port=6000)

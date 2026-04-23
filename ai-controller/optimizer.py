@@ -1,9 +1,14 @@
 """
-Purpose: Genetic Algorithm optimization routine. Evolves a 6-parameter vector for the Fuzzy Inference System to minimize a cost function incorporating latency penalties and resource waste.
-         Supports offline execution and an online daemon thread for continuous adaptation.
-Usage: Run standalone to generate initial fuzzy_params.json, or let it run via the daemon initiated by the brain server.
+Purpose: Genetic Algorithm optimization routine. Evolves a 6-parameter vector
+for the Fuzzy Inference System to minimize a cost function incorporating
+latency penalties and resource waste. Supports offline execution and an online
+daemon thread for continuous adaptation.
+Usage:
+    python optimizer.py                          # uses ai_traffic_data.csv by default
+    python optimizer.py --data data/custom.csv
 """
 
+import argparse
 import json
 import os
 import threading
@@ -19,7 +24,7 @@ warnings.filterwarnings("ignore")
 
 # ── Paths ─────────────────────────────────────────────────────────────────────
 SCRIPT_DIR       = os.path.dirname(os.path.abspath(__file__))
-DATA_PATH        = os.path.join(SCRIPT_DIR, "data/traffic_data.csv")
+DEFAULT_DATA_PATH = os.path.join(SCRIPT_DIR, "data/ai_traffic_data.csv")
 PARAM_SAVE_PATH  = os.path.join(SCRIPT_DIR, "models/fuzzy_params.json")
 BRAIN_RELOAD_URL = "http://localhost:6000/reload_params"
 
@@ -52,7 +57,7 @@ GENE_SPACE = [
 #  DATA LOADING
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _load_and_resample(data_path: str = DATA_PATH, n_rows: int = 999_999) -> pd.DataFrame:
+def _load_and_resample(data_path: str, n_rows: int = 999_999) -> pd.DataFrame:
     if not os.path.exists(data_path):
         return pd.DataFrame()
 
@@ -76,20 +81,12 @@ def _load_and_resample(data_path: str = DATA_PATH, n_rows: int = 999_999) -> pd.
     return df.reset_index(drop=True)
 
 
-def load_recent_rows(n_rows: int = ONLINE_WINDOW) -> pd.DataFrame:
-    return _load_and_resample(DATA_PATH, n_rows=n_rows)
-
-
-"""
-optimizer.py  —  PATCH for the magic-number capacity fix.
-
-Replace these two functions in the existing optimizer.py.
-Everything else (imports, GENE_SPACE, save_params, run_online_ga, etc.)
-stays exactly the same.
-"""
+def load_recent_rows(n_rows: int = ONLINE_WINDOW,
+                     data_path: str = DEFAULT_DATA_PATH) -> pd.DataFrame:
+    return _load_and_resample(data_path, n_rows=n_rows)
 
 # ─────────────────────────────────────────────────────────────────────────────
-#  CAPACITY ESTIMATION  (replaces the hardcoded 10.0 / 150)
+#  CAPACITY ESTIMATION
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _estimate_capacity(df: pd.DataFrame) -> float:
@@ -121,9 +118,8 @@ def _estimate_capacity(df: pd.DataFrame) -> float:
     ].copy()
 
     if len(healthy) < MIN_HEALTHY_ROWS:
-        print(f"[GA] Warning: only {len(healthy)} healthy rows found for capacity "
-              f"estimation — using fallback of 10.0 rps/replica.")
-        return 10.0
+        print(f"[GA] Warning: only {len(healthy)} healthy rows — using fallback 50.0 rps/replica.")
+        return 50.0
 
     healthy['load_per_replica'] = healthy['rps'] / healthy['replicas'].clip(lower=1)
     est = float(np.percentile(healthy['load_per_replica'], 95))
@@ -277,62 +273,64 @@ def run_optimization(df: pd.DataFrame,
 #  ONLINE CONTINUOUS ADAPTATION  (Objective A)
 # ─────────────────────────────────────────────────────────────────────────────
 
-def run_online_ga(interval: int = ONLINE_INTERVAL, window: int = ONLINE_WINDOW):
+def run_online_ga(interval:  int = ONLINE_INTERVAL,
+                  window:    int = ONLINE_WINDOW,
+                  data_path: str = DEFAULT_DATA_PATH):
     """
-    Starts a daemon thread that re-evolves fuzzy params every `interval`
-    seconds and hot-reloads brain_server via POST /reload_params.
-
-    Called once from brain_server.py at startup.
+    Daemon thread that re-evolves fuzzy params every `interval` seconds
+    and hot-reloads brain_server. Called once from brain_server.py at startup.
     """
     global _online_running
     if _online_running:
         print("[GA] Online loop already active — ignoring duplicate call.")
         return
     _online_running = True
-
+ 
     def _loop():
-        print(f"[GA] Online adaptation thread started  "
-              f"(every {interval}s, window={window} rows).")
+        print(f"[GA] Online adaptation thread started "
+              f"(every {interval}s, window={window}, data={data_path})")
         while True:
             time.sleep(interval)
             try:
                 print("[GA] Starting online optimisation cycle...")
-                df = load_recent_rows(window)
-
+                df = load_recent_rows(window, data_path=data_path)
+ 
                 if len(df) < 20:
-                    print(f"[GA] Only {len(df)} rows available — skipping cycle.")
+                    print(f"[GA] Only {len(df)} rows available — skipping.")
                     continue
-
-                solution = run_optimization(
-                    df,
-                    num_generations = 15,
-                    sol_per_pop     = 8,
-                    verbose         = False,
-                )
+ 
+                solution = run_optimization(df, num_generations=15,
+                                            sol_per_pop=8, verbose=False)
                 if solution is not None:
                     save_params(solution)
                     _notify_brain()
                     print("[GA] Online cycle complete.")
-
+ 
             except Exception as e:
                 print(f"[GA] Online cycle error: {e}")
-
-    t = threading.Thread(target=_loop, daemon=True, name="online-ga")
-    t.start()
+ 
+    threading.Thread(target=_loop, daemon=True, name="online-ga").start()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-#  OFFLINE ONE-SHOT ENTRY POINT
+#  OFFLINE ENTRY POINT
 # ─────────────────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Offline GA optimisation")
+    parser.add_argument(
+        '--data', default=DEFAULT_DATA_PATH,
+        help='CSV file to optimise on (default: ai_traffic_data.csv)'
+    )
+    args = parser.parse_args()
+ 
     print("=== Offline GA Optimisation ===")
-    print(f"Loading data from {DATA_PATH} ...")
-    df = _load_and_resample(DATA_PATH)
+    print(f"Loading data from {args.data} ...")
+    df = _load_and_resample(args.data)
     print(f"  {len(df)} rows after resampling.")
-
+ 
     solution = run_optimization(df, num_generations=20, sol_per_pop=10, verbose=True)
-
+ 
     if solution is not None:
         save_params(solution)
         print("\nDone. Restart brain_server.py to apply the new parameters.")

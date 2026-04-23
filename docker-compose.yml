@@ -1,20 +1,21 @@
-# Purpose: Docker orchestration configuration. Defines the scalable backend service and the static Nginx load balancer to distribute traffic.
-# Usage: Execute to build and start the infrastructure.
+# Purpose: Docker orchestration configuration. Defines the scalable backend
+# service and the static Nginx load balancer to distribute traffic.
+# Usage: docker compose up -d --scale server=N
+
 services:
     server:
         build: .
         image: autoscaling-server
         expose:
             - "5000"
-
+        cpus: '2.0'        # plain compose syntax — actually enforced unlike deploy.resources
+        mem_limit: 512m    # prevents a runaway container from killing the host
 
     nginx:
         image: nginx:alpine
-        ports:  
-          - "8080:80"
-        
+        ports:
+            - "8080:80"
         volumes:
-          - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
-
+            - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
         depends_on:
-          - server
+            - server
